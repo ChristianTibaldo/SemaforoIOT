@@ -1,0 +1,9 @@
+cluster_url = bf89bd34a48e407abd232255e6194d47.s1.eu.hivemq.cloud
+cluster_port = 8883
+cluster_websocket_port = 8884
+cluster_mqtt_url = bf89bd34a48e407abd232255e6194d47.s1.eu.hivemq.cloud:8883
+cluster_websocket_url = bf89bd34a48e407abd232255e6194d47.s1.eu.hivemq.cloud:8884/mqtt
+web_client_website_username = DevWebsite
+web_client_website_password = DevWebsite123
+web_client_app_username = DevApp
+web_client_app_password = DevApp123
