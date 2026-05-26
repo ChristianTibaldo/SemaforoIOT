@@ -151,7 +151,7 @@ void gestisciLed() {
 }
 
 void gestisciHCSR04() {
-    if ((subStatoAttuale == 1 || subStatoAttuale == 2) && millisAttuali - millisPrecedentiHCSR04 >= DURATA_LETTURA_DISTANZA) {
+    if (subStatoAttuale != 3 && millisAttuali - millisPrecedentiHCSR04 >= DURATA_LETTURA_DISTANZA) {
         digitalWrite(PIN_TRIG, LOW);
         delayMicroseconds(2);
         digitalWrite(PIN_TRIG, HIGH);
@@ -176,8 +176,22 @@ void gestisciPulsante() {
     bool stato = digitalRead(PIN_PULSANTE);
 
     if (statoPrecedentePulsante == HIGH && stato == LOW) {
-        String payload = "pulsante premuto";
-        client.publish(CLUSTER_TOPIC_DATI, payload.c_str());
+        if (subStatoAttuale == 1) {
+            digitalWrite(PIN_LED_VERDE, LOW);
+            digitalWrite(PIN_LED_GIALLO, HIGH);
+
+            subStatoAttuale = 2;
+            millisPrecedentiLED = millisAttuali;
+
+            String payload = "giallo";
+            client.publish(CLUSTER_TOPIC_LUCE, payload.c_str());
+        }
+        // else if (substatoAttuale == 2) {
+        // codice buzzer "aspetta"
+        // }
+        // else if (substatoAttuale == 3) {
+        // codice buzzer "passa"
+        // }
     }
 
     statoPrecedentePulsante = stato;
