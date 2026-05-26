@@ -3,6 +3,14 @@
 #include <DHT.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <Wire.h>                      // --- NUOVO ---
+#include <MPU9250.h>                   // --- NUOVO ---
+#include <SPI.h>                       // --- NUOVO ---
+#include <MFRC522.h>                   // --- NUOVO ---
+#include <SPIFFS.h>                    // --- NUOVO ---
+#include "AudioFileSourceSPIFFS.h"     // --- NUOVO ---
+#include "AudioGeneratorWAV.h"         // --- NUOVO ---
+#include "AudioOutputI2S.h"            // --- NUOVO ---
 
 // impostazioni dati
 const int DURATA_DATI = 5000;
@@ -37,7 +45,7 @@ unsigned long millisPrecedentiHCSR04 = 0;
 bool veicoli[10] = {false};
 int indiceVeicoli = 0;
 
-// impostazioni pulsane
+// impostazioni pulsante
 const int PIN_PULSANTE = 15;
 bool statoPrecedentePulsante = HIGH;
 
@@ -46,8 +54,8 @@ const int PIN_DHT = 18;
 DHT dht(PIN_DHT, DHT22);
 
 // impostazioni wifi
-const char* WIFI_SSID = "Tibaldo";
-const char* WIFI_PASSWORD = "ciao1234";
+const char* WIFI_SSID = "iPhone di Christian";
+const char* WIFI_PASSWORD = "montagna";
 WiFiClientSecure espClient;
 
 // impostazioni cluster
@@ -58,7 +66,39 @@ const char* CLUSTER_PASSWORD = "DevEsp123";
 const char* CLUSTER_TOPIC_COMANDI = "esp/comandi";
 const char* CLUSTER_TOPIC_DATI = "esp/dati";
 const char* CLUSTER_TOPIC_LUCE = "esp/luce";
+const char* CLUSTER_TOPIC_RFID = "esp/rfid"; // --- NUOVO ---
 PubSubClient client(espClient);
+
+// impostazioni giroscopio
+MPU9250 mpu;
+
+// impostazioni HW-072 (luminosità) [3.3V] --- NUOVO ---
+// VCC→3.3V, GND→GND, AO→GPIO34
+const int PIN_LUMINOSITA = 34;
+
+// impostazioni sensore acqua [3.3V] --- NUOVO ---
+// VCC→3.3V, GND→GND, S→GPIO35
+const int PIN_ACQUA = 35;
+const int SOGLIA_ACQUA = 500;
+
+// impostazioni RFID-RC522 [3.3V — NON usare 5V, danneggia il modulo] --- NUOVO ---
+// VCC→3.3V, GND→GND, SDA(SS)→GPIO27, SCK→GPIO14
+// MOSI→GPIO13, MISO→GPIO33, RST→GPIO32
+const int PIN_RFID_SS = 27;
+const int PIN_RFID_RST = 32;
+const int PIN_RFID_SCK = 14;
+const int PIN_RFID_MOSI = 13;
+const int PIN_RFID_MISO = 33;
+MFRC522 rfid(PIN_RFID_SS, PIN_RFID_RST); // --- NUOVO ---
+
+// impostazioni speaker [DAC interno ESP32] --- NUOVO ---
+// Segnale→GPIO25 (DAC0), GND→GND
+// File: /data/suono.wav — PCM mono, 16-bit, 16000Hz
+// Caricamento: pio run --target uploadfs
+AudioFileSourceSPIFFS* audioSource = nullptr;  // --- NUOVO ---
+AudioGeneratorWAV* audioWav = nullptr;          // --- NUOVO ---
+AudioOutputI2S* audioOutput = nullptr;          // --- NUOVO ---
+bool audioInRiproduzione = false;               // --- NUOVO ---
 
 int wrap(int amt, int min, int max) {
     int range = max - min;
@@ -172,6 +212,52 @@ void gestisciHCSR04() {
     }
 }
 
+// --- NUOVO ---
+void gestisciRFID() {
+    if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
+
+    String uid = "";
+    for (byte i = 0; i < rfid.uid.size; i++) {
+        if (rfid.uid.uidByte[i] < 0x10) uid += "0";
+        uid += String(rfid.uid.uidByte[i], HEX);
+        if (i < rfid.uid.size - 1) uid += ":";
+    }
+    uid.toUpperCase();
+    client.publish(CLUSTER_TOPIC_RFID, uid.c_str());
+
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+}
+
+// --- NUOVO ---
+void riproduciAudio(const char* percorso) {
+    if (audioInRiproduzione) return;
+
+    audioSource = new AudioFileSourceSPIFFS(percorso);
+    audioOutput = new AudioOutputI2S(0, AudioOutputI2S::INTERNAL_DAC);
+    audioOutput->SetOutputModeMono(true);
+    audioOutput->SetGain(0.5);
+    audioWav = new AudioGeneratorWAV();
+    audioWav->begin(audioSource, audioOutput);
+    audioInRiproduzione = true;
+}
+
+// --- NUOVO ---
+void gestisciAudio() {
+    if (!audioInRiproduzione || audioWav == nullptr) return;
+
+    if (audioWav->isRunning()) {
+        audioWav->loop();
+    }
+    else {
+        audioWav->stop();
+        delete audioWav;    audioWav    = nullptr;
+        delete audioSource; audioSource = nullptr;
+        delete audioOutput; audioOutput = nullptr;
+        audioInRiproduzione = false;
+    }
+}
+
 void gestisciPulsante() {
     bool stato = digitalRead(PIN_PULSANTE);
 
@@ -186,9 +272,9 @@ void gestisciPulsante() {
             String payload = "giallo";
             client.publish(CLUSTER_TOPIC_LUCE, payload.c_str());
         }
-        // else if (substatoAttuale == 2) {
-        // codice buzzer "aspetta"
-        // }
+        else if (subStatoAttuale == 2) {
+            riproduciAudio("/wait.wav");
+        }
         // else if (substatoAttuale == 3) {
         // codice buzzer "passa"
         // }
@@ -218,10 +304,23 @@ void gestisciDati() {
     else {
         traffico = "basso";
     }
+    bool luminosita = analogRead(PIN_LUMINOSITA) < 1;
+    bool acqua = analogRead(PIN_ACQUA) > SOGLIA_ACQUA;
 
-    payloadJson["traffico"] = traffico;
-    payloadJson["umidita"] = umidita;
+    mpu.update();
+    JsonObject giroscopio = payloadJson["giroscopio"].to<JsonObject>();
+    giroscopio["x"] = mpu.getGyroX();
+    giroscopio["y"] = mpu.getGyroY();
+    giroscopio["z"] = mpu.getGyroZ();
+    JsonObject accelerometro = payloadJson["accelerometro"].to<JsonObject>();
+    accelerometro["x"] = mpu.getAccX();
+    accelerometro["y"] = mpu.getAccY();
+    accelerometro["z"] = mpu.getAccZ();
+    payloadJson["traffico"]    = traffico;
+    payloadJson["umidita"]     = umidita;
     payloadJson["temperatura"] = temperatura;
+    payloadJson["luminosita"]  = luminosita;
+    payloadJson["acqua"]       = acqua;
 
     String payloadString;
     serializeJson(payloadJson, payloadString);
@@ -259,6 +358,9 @@ void reconnect() {
 }
 
 void setup() {
+    Serial.begin(115200);
+    Wire.begin();
+
     pinMode(PIN_LED_VERDE, OUTPUT);
     pinMode(PIN_LED_GIALLO, OUTPUT);
     pinMode(PIN_LED_ROSSO, OUTPUT);
@@ -269,6 +371,17 @@ void setup() {
     pinMode(PIN_PULSANTE, INPUT_PULLUP);
 
     dht.begin();
+
+    mpu.setup(0x68);
+
+    SPI.begin(PIN_RFID_SCK, PIN_RFID_MISO, PIN_RFID_MOSI, PIN_RFID_SS);
+    rfid.PCD_Init();
+
+    pinMode(PIN_LUMINOSITA, INPUT);
+    pinMode(PIN_ACQUA, INPUT);
+
+    SPIFFS.begin(true);
+    // --- FINE NUOVO ---
 
     setup_wifi();
 
@@ -283,6 +396,8 @@ void loop() {
     gestisciLed();
     gestisciHCSR04();
     gestisciPulsante();
+    gestisciRFID();   // --- NUOVO ---
+    gestisciAudio();  // --- NUOVO ---
 
     if (millisAttuali - millisPrecedentiDati >= DURATA_DATI) {
         gestisciDati();
